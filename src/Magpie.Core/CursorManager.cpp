@@ -142,14 +142,59 @@ static const SavedSystemCursors& GetSavedSystemCursors() noexcept {
 }
 
 static HCURSOR CreateTransparentCursor() noexcept {
-	// AND 掩码全 1、XOR 掩码全 0 即为完全透明
+	// 使用 32 位带 Alpha 的彩色光标。单色（掩码）光标会被 Virtual Desktop 等串流软件
+	// 与画面错误合成，残留方框状的痕迹。
+	// 注意 Alpha 全为 0 时系统会忽略 Alpha 通道转而使用掩码，因此让一个像素的 Alpha 为 1，
+	// 这个像素几乎不可见。
 	constexpr int SIZE = 32;
+
+	BITMAPINFO bi{
+		.bmiHeader{
+			.biSize = sizeof(BITMAPINFOHEADER),
+			.biWidth = SIZE,
+			.biHeight = -SIZE,
+			.biPlanes = 1,
+			.biBitCount = 32,
+			.biCompression = BI_RGB
+		}
+	};
+
+	void* bits = nullptr;
+	wil::unique_hbitmap hbmColor(CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0));
+	if (!hbmColor || !bits) {
+		Logger::Get().Win32Error("CreateDIBSection 失败");
+		return NULL;
+	}
+
+	uint32_t* pixels = (uint32_t*)bits;
+	std::fill(pixels, pixels + SIZE * SIZE, 0u);
+	// BGRA：黑色，Alpha 为 1
+	pixels[0] = 0x01000000;
+	GdiFlush();
+
 	constexpr size_t MASK_BYTES = SIZE / 8 * SIZE;
 	uint8_t andMask[MASK_BYTES];
-	uint8_t xorMask[MASK_BYTES];
 	std::fill(std::begin(andMask), std::end(andMask), (uint8_t)0xFF);
-	std::fill(std::begin(xorMask), std::end(xorMask), (uint8_t)0);
-	return CreateCursor(GetModuleHandle(nullptr), 0, 0, SIZE, SIZE, andMask, xorMask);
+	wil::unique_hbitmap hbmMask(CreateBitmap(SIZE, SIZE, 1, 1, andMask));
+	if (!hbmMask) {
+		Logger::Get().Win32Error("CreateBitmap 失败");
+		return NULL;
+	}
+
+	ICONINFO iconInfo{
+		.fIcon = FALSE,
+		.xHotspot = 0,
+		.yHotspot = 0,
+		.hbmMask = hbmMask.get(),
+		.hbmColor = hbmColor.get()
+	};
+
+	// CreateIconIndirect 会复制位图，之后可以安全释放
+	HCURSOR hCursor = (HCURSOR)CreateIconIndirect(&iconInfo);
+	if (!hCursor) {
+		Logger::Get().Win32Error("CreateIconIndirect 失败");
+	}
+	return hCursor;
 }
 
 HCURSOR CursorManager::ResolveOriginalCursor(HCURSOR hCursor) noexcept {
