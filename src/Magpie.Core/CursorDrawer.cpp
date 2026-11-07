@@ -375,7 +375,8 @@ const CursorDrawer::_CursorInfo* CursorDrawer::_ResolveCursor(HCURSOR hCursor) n
 	}
 
 	ICONINFO iconInfo{};
-	if (!GetIconInfo(hCursor, &iconInfo)) {
+	// 系统光标可能已被替换为透明光标，使用替换前保存的副本
+	if (!GetIconInfo(CursorManager::ResolveOriginalCursor(hCursor), &iconInfo)) {
 		Logger::Get().Win32Error("GetIconInfo 失败");
 		return nullptr;
 	}

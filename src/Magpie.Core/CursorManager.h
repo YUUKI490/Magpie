@@ -56,8 +56,16 @@ public:
 		return _lastCompletedHitTestResult;
 	}
 
+	// 系统光标被替换为透明光标时，返回替换前保存的副本，用于绘制光标形状。
+	// 不是系统光标时原样返回。
+	static HCURSOR ResolveOriginalCursor(HCURSOR hCursor) noexcept;
+
 private:
 	void _ShowSystemCursor(bool show, bool onDestory = false);
+
+	// 将系统光标替换为透明光标或还原。Virtual Desktop 等串流软件会自行绘制系统光标，
+	// 仅靠 ShowSystemCursor 无法隐藏，导致出现两个光标。
+	void _SetSystemCursorsTransparent(bool transparent, bool onDestory = false) noexcept;
 
 	void _AdjustCursorSpeed() noexcept;
 
@@ -114,6 +122,8 @@ private:
 	bool _isCapturedOnOverlay = false;
 
 	bool _isSystemCursorShown = true;
+
+	bool _areSystemCursorsTransparent = false;
 
 	static inline const HCURSOR _hDiagonalSize1Cursor = LoadCursor(NULL, IDC_SIZENWSE);
 	static inline const HCURSOR _hDiagonalSize2Cursor = LoadCursor(NULL, IDC_SIZENESW);

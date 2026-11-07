@@ -95,6 +95,117 @@ static POINT ScalingToSrc(POINT pt, RoundMethod roundType = RoundMethod::Round) 
 	return result;
 }
 
+// 需要替换为透明光标的系统光标
+static constexpr DWORD SYSTEM_CURSOR_IDS[] = {
+	32512, // OCR_NORMAL
+	32513, // OCR_IBEAM
+	32514, // OCR_WAIT
+	32515, // OCR_CROSS
+	32516, // OCR_UP
+	32642, // OCR_SIZENWSE
+	32643, // OCR_SIZENESW
+	32644, // OCR_SIZEWE
+	32645, // OCR_SIZENS
+	32646, // OCR_SIZEALL
+	32648, // OCR_NO
+	32649, // OCR_HAND
+	32650, // OCR_APPSTARTING
+	32651, // OCR_HELP
+	32671, // OCR_PIN
+	32672  // OCR_PERSON
+};
+
+static constexpr size_t SYSTEM_CURSOR_COUNT = std::size(SYSTEM_CURSOR_IDS);
+
+struct SavedSystemCursors {
+	// 系统光标的共享句柄。SetSystemCursor 只替换内容，句柄保持不变
+	std::array<HCURSOR, SYSTEM_CURSOR_COUNT> handles{};
+	// 替换前的光标副本
+	std::array<HCURSOR, SYSTEM_CURSOR_COUNT> copies{};
+};
+
+// 只初始化一次，之后只读，因此可以安全地在渲染线程中读取
+static const SavedSystemCursors& GetSavedSystemCursors() noexcept {
+	static const SavedSystemCursors saved = []() {
+		// 上次异常退出时系统光标可能仍是透明的，先从注册表重新加载
+		SystemParametersInfo(SPI_SETCURSORS, 0, nullptr, 0);
+
+		SavedSystemCursors result;
+		for (size_t i = 0; i < SYSTEM_CURSOR_COUNT; ++i) {
+			HCURSOR hCursor = LoadCursor(NULL, MAKEINTRESOURCE(SYSTEM_CURSOR_IDS[i]));
+			result.handles[i] = hCursor;
+			result.copies[i] = hCursor ? (HCURSOR)CopyIcon(hCursor) : NULL;
+		}
+		return result;
+	}();
+	return saved;
+}
+
+static HCURSOR CreateTransparentCursor() noexcept {
+	// AND 掩码全 1、XOR 掩码全 0 即为完全透明
+	constexpr int SIZE = 32;
+	constexpr size_t MASK_BYTES = SIZE / 8 * SIZE;
+	uint8_t andMask[MASK_BYTES];
+	uint8_t xorMask[MASK_BYTES];
+	std::fill(std::begin(andMask), std::end(andMask), (uint8_t)0xFF);
+	std::fill(std::begin(xorMask), std::end(xorMask), (uint8_t)0);
+	return CreateCursor(GetModuleHandle(nullptr), 0, 0, SIZE, SIZE, andMask, xorMask);
+}
+
+HCURSOR CursorManager::ResolveOriginalCursor(HCURSOR hCursor) noexcept {
+	if (!hCursor) {
+		return hCursor;
+	}
+
+	const SavedSystemCursors& saved = GetSavedSystemCursors();
+	for (size_t i = 0; i < SYSTEM_CURSOR_COUNT; ++i) {
+		if (saved.handles[i] == hCursor) {
+			return saved.copies[i] ? saved.copies[i] : hCursor;
+		}
+	}
+
+	return hCursor;
+}
+
+void CursorManager::_SetSystemCursorsTransparent(bool transparent, bool onDestory) noexcept {
+	if (_areSystemCursorsTransparent == transparent) {
+		return;
+	}
+
+	if (!transparent && onDestory) {
+		// 退出时从注册表完整还原（包括动画光标）
+		SystemParametersInfo(SPI_SETCURSORS, 0, nullptr, 0);
+		_areSystemCursorsTransparent = false;
+		return;
+	}
+
+	const SavedSystemCursors& saved = GetSavedSystemCursors();
+	for (size_t i = 0; i < SYSTEM_CURSOR_COUNT; ++i) {
+		if (!saved.handles[i]) {
+			continue;
+		}
+
+		HCURSOR hNewCursor = NULL;
+		if (transparent) {
+			hNewCursor = CreateTransparentCursor();
+		} else if (saved.copies[i]) {
+			hNewCursor = (HCURSOR)CopyIcon(saved.copies[i]);
+		}
+
+		if (!hNewCursor) {
+			continue;
+		}
+
+		// 成功时系统会销毁 hNewCursor
+		if (!SetSystemCursor(hNewCursor, SYSTEM_CURSOR_IDS[i])) {
+			Logger::Get().Win32Error("SetSystemCursor 失败");
+			DestroyCursor(hNewCursor);
+		}
+	}
+
+	_areSystemCursorsTransparent = transparent;
+}
+
 CursorManager::~CursorManager() noexcept {
 	_ShowSystemCursor(true, true);
 	_RestoreClipCursor();
@@ -196,6 +307,9 @@ void CursorManager::_ShowSystemCursor(bool show, bool onDestory) {
 	if (ScalingWindow::Get().Options().IsDebugMode()) {
 		return;
 	}
+
+	// 隐藏系统光标时同时替换为透明光标，防止 Virtual Desktop 等串流软件显示两个光标
+	_SetSystemCursorsTransparent(!show, onDestory);
 
 	if (_isSystemCursorShown == show) {
 		return;
